@@ -1,68 +1,72 @@
-import torch
-import torchvision
-from torch.utils.data import TensorDataset
+import argparse, os, joblib, wandb
+import pandas as pd
+from io import StringIO
+from sklearn.preprocessing import StandardScaler
 
-#testing
-import os
-import argparse
-import wandb
-
+# ──────────── CLI ────────────
 parser = argparse.ArgumentParser()
-parser.add_argument('--IdExecution', type=str, help='ID of the execution')
-args = parser.parse_args()
+parser.add_argument("--IdExecution", type=str, help="Execution ID")
+exec_id = parser.parse_args().IdExecution or "local-test"
+print(f"IdExecution: {exec_id}")
 
-if args.IdExecution:
-    print(f"IdExecution: {args.IdExecution}")
-else:
-    args.IdExecution = "testing console"
+# ─────────── HELPERS ─────────
+def load_split(dir_path, split):
+    return pd.read_csv(os.path.join(dir_path, f"{split}.csv"))
 
-def preprocess(dataset, normalize=True, expand_dims=True):
-    """
-    ## Prepare the data
-    """
-    x, y = dataset.tensors
-
-    if normalize:
-        # Scale images to the [0, 1] range
-        x = x.type(torch.float32) / 255
-
-    if expand_dims:
-        # Make sure images have shape (1, 28, 28)
-        x = torch.unsqueeze(x, 1)
-    
-    return TensorDataset(x, y)
-
-def preprocess_and_log(steps):
-
-    with wandb.init(project="MLOps-Pycon2023",name=f"Preprocess Data ExecId-{args.IdExecution}", job_type="preprocess-data") as run:    
-        processed_data = wandb.Artifact(
-            "mnist-preprocess", type="dataset",
-            description="Preprocessed MNIST dataset",
-            metadata=steps)
-         
-        # ✔️ declare which artifact we'll be using
-        raw_data_artifact = run.use_artifact('mnist-raw:latest')
-
-        # 📥 if need be, download the artifact
-        raw_dataset = raw_data_artifact.download(root="./data/artifacts/")
+def preprocess_and_log():
+    with wandb.init(
+        project="ExperienciasEnAnalitica",
+        name=f"Preprocess Data ExecId-{exec_id}",
+        job_type="preprocess-data",
+    ) as run:
         
-        for split in ["training", "validation", "test"]:
-            raw_split = read(raw_dataset, split)
-            processed_dataset = preprocess(raw_split, **steps)
+        raw_art = run.use_artifact("california-raw:latest")
+        raw_dir = raw_art.download()
 
-            with processed_data.new_file(split + ".pt", mode="wb") as file:
-                x, y = processed_dataset.tensors
-                torch.save((x, y), file)
+        train_df = load_split(raw_dir, "training")
+        val_df   = load_split(raw_dir, "validation")
+        test_df  = load_split(raw_dir, "test")
 
-        run.log_artifact(processed_data)
+        
+        scaler = StandardScaler()
+        X_train = train_df.drop(columns=["MedHouseVal"])
+        scaler.fit(X_train)
 
-def read(data_dir, split):
-    filename = split + ".pt"
-    x, y = torch.load(os.path.join(data_dir, filename))
+        def transform(df):
+            X = df.drop(columns=["MedHouseVal"])
+            y = df["MedHouseVal"]
+            X_scaled = pd.DataFrame(
+                scaler.transform(X), columns=X.columns, index=X.index
+            )
+            return pd.concat([X_scaled, y], axis=1)
 
-    return TensorDataset(x, y)
+        train_p = transform(train_df)
+        val_p   = transform(val_df)
+        test_p  = transform(test_df)
 
-steps = {"normalize": True,
-         "expand_dims": False}
+        
+        proc_art = wandb.Artifact(
+            "california-preprocess",
+            type="dataset",
+            description="California Housing escalado con StandardScaler",
+            metadata={"scaler": "StandardScaler()"},
+        )
 
-preprocess_and_log(steps)
+        for name, df in zip(
+            ["training", "validation", "test"], [train_p, val_p, test_p]
+        ):
+            buf = StringIO()
+            df.to_csv(buf, index=False)
+            buf.seek(0)
+            with proc_art.new_file(f"{name}.csv", mode="w") as f:
+                f.write(buf.read())
+
+        
+        joblib.dump(scaler, "scaler.pkl")
+        proc_art.add_file("scaler.pkl")
+
+        run.log_artifact(proc_art)
+        print("🟢 Artefacto `california-preprocess` registrado.")
+
+if __name__ == "__main__":
+    preprocess_and_log()
