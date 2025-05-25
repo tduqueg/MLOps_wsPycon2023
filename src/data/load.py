@@ -1,62 +1,64 @@
-import torch
-import torchvision
-from torch.utils.data import TensorDataset
-# Testing
 import argparse
+from io import StringIO
+
+import pandas as pd
+from sklearn.datasets import fetch_california_housing
+from sklearn.model_selection import train_test_split
 import wandb
-#run
+
+# ───────────── CLI ─────────────
 parser = argparse.ArgumentParser()
-parser.add_argument('--IdExecution', type=str, help='ID of the execution')
+parser.add_argument("--IdExecution", type=str, help="Execution ID")
 args = parser.parse_args()
+exec_id = args.IdExecution or "local-test"
+print(f"IdExecution: {exec_id}")
 
-if args.IdExecution:
-    print(f"IdExecution: {args.IdExecution}")
+# ───────── LOAD & SPLIT ────────
+def make_splits(train_size=0.8, val_size=0.1):
+    cali = fetch_california_housing(as_frame=True)
+    df = cali.frame          
 
-def load(train_size=.8):
-    """
-    # Load the data
-    """
-      
-    # the data, split between train and test sets
-    train = torchvision.datasets.MNIST(root='./data', train=True, download=True)
-    test = torchvision.datasets.MNIST(root='./data', train=False, download=True)
+    X = df.drop(columns=["MedHouseVal"])
+    y = df["MedHouseVal"]
 
-    (x_train, y_train), (x_test, y_test) = (train.data, train.targets), (test.data, test.targets)
+    X_train, X_tmp, y_train, y_tmp = train_test_split(
+        X, y, train_size=train_size, random_state=42
+    )
+    val_rel = val_size / (1 - train_size)
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_tmp, y_tmp, train_size=val_rel, random_state=42
+    )
 
-    # split off a validation set for hyperparameter tuning
-    x_train, x_val = x_train[:int(len(train)*train_size)], x_train[int(len(train)*train_size):]
-    y_train, y_val = y_train[:int(len(train)*train_size)], y_train[int(len(train)*train_size):]
+    return {
+        "training":   pd.concat([X_train, y_train], axis=1),
+        "validation": pd.concat([X_val,  y_val],  axis=1),
+        "test":       pd.concat([X_test, y_test], axis=1),
+    }
 
-    training_set = TensorDataset(x_train, y_train)
-    validation_set = TensorDataset(x_val, y_val)
-    test_set = TensorDataset(x_test, y_test)
-    datasets = [training_set, validation_set, test_set]
-    return datasets
-
+# ─────────── W&B LOG ───────────
 def load_and_log():
-    # 🚀 start a run, with a type to label it and a project it can call home
     with wandb.init(
         project="ExperienciasEnAnalitica",
-        name=f"Load Raw Data ExecId-{args.IdExecution}", job_type="load-data") as run:
-        
-        datasets = load()  # separate code for loading the datasets
-        names = ["training", "validation", "test"]
+        name=f"Load California Data ExecId-{exec_id}",
+        job_type="load-data",
+    ) as run:
+        splits = make_splits()
+        art = wandb.Artifact(
+            "california-raw",
+            type="dataset",
+            description="California Housing split train/val/test",
+            metadata={k: len(v) for k, v in splits.items()},
+        )
 
-        # 🏺 create our Artifact
-        raw_data = wandb.Artifact(
-            "mnist-raw", type="dataset",
-            description="raw MNIST dataset, split into train/val/test",
-            metadata={"source": "torchvision.datasets.MNIST",
-                      "sizes": [len(dataset) for dataset in datasets]})
+        for name, df in splits.items():
+            buf = StringIO()
+            df.to_csv(buf, index=False)
+            buf.seek(0)
+            with art.new_file(f"{name}.csv", mode="w") as f:
+                f.write(buf.read())
 
-        for name, data in zip(names, datasets):
-            # 🐣 Store a new file in the artifact, and write something into its contents.
-            with raw_data.new_file(name + ".pt", mode="wb") as file:
-                x, y = data.tensors
-                torch.save((x, y), file)
+        run.log_artifact(art)
+        print("🟢 Dataset California Housing subido.")
 
-        # ✍️ Save the artifact to W&B.
-        run.log_artifact(raw_data)
-
-# testing
-load_and_log()
+if __name__ == "__main__":
+    load_and_log()
